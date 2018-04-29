@@ -196,7 +196,8 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws,
+  h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<
+      uWS::SERVER> ws,
                                                                                                            char *data,
                                                                                                            size_t length,
                                                                                                            uWS::OpCode opCode) {
@@ -240,6 +241,19 @@ int main() {
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
+          // Set object lane
+          int target_lane_id = 1;
+
+          // Set target speed
+          double eventual_target_speed = 49;
+          double target_speed;
+          double speed_step = 2;
+          if (car_speed + speed_step < eventual_target_speed) {
+            target_speed = car_speed + speed_step;
+          } else {
+            target_speed = car_speed - speed_step;
+          }
+
           // TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
 
           // Temporary points to work with for calculating the fitting curve
@@ -275,23 +289,23 @@ int main() {
             ptsy.push_back(previous_path_y[prev_path_size - 1]);
           }
 
-          // Also, the first 2 points of the created list is going to be used to determine the car coordination system.
+          // Also, the first 2 points of the created list is going to be used to determine the local coordination system.
           // The yaw of the vector (ref_yaw) created by the first 2 points decide the rotation from world coordinates,
           // and the location of the first point (ref_x and ref_y) decides the translation from world coordinates
-          double ref_x = ptsx[0];
-          double ref_y = ptsy[0];
+          double ref_x = ptsx[1];
+          double ref_y = ptsy[1];
           double ref_yaw = atan2(ptsy[1] - ptsy[0], ptsx[1] - ptsx[0]);
-
-          // Set object lane
-          int lane_id = 0;
+          auto ref_sd = getFrenet(ref_x, ref_y, ref_yaw, map_waypoints_x, map_waypoints_y);
+          double ref_s = ref_sd[0];
+          double ref_d = ref_sd[1];
 
           // Add more target points into the list for fitting
           vector<double> next_waypoint_1 =
-              getXY(car_s + 3, getLaneFrenetD(lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              getXY(car_s + 30, getLaneFrenetD(target_lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
           vector<double> next_waypoint_2 =
-              getXY(car_s + 6, getLaneFrenetD(lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              getXY(car_s + 60, getLaneFrenetD(target_lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
           vector<double> next_waypoint_3 =
-              getXY(car_s + 9, getLaneFrenetD(lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              getXY(car_s + 90, getLaneFrenetD(target_lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
           ptsx.push_back(next_waypoint_1[0]);
           ptsx.push_back(next_waypoint_2[0]);
@@ -301,17 +315,22 @@ int main() {
           ptsy.push_back(next_waypoint_2[1]);
           ptsy.push_back(next_waypoint_3[1]);
 
-          std::cout << "prev_count " << previous_path_x.size() << " " << previous_path_y.size() << std::endl;
+//          std::cout << "prev_count " << previous_path_x.size() << " " << previous_path_y.size() << std::endl;
 
-//          double dist_inc = 0.5;
-//          for(int i = 0; i < 50; i++)
-//          {
-//            double next_s = car_s + (i + 1) * dist_inc;
-//            double next_d = 2;
-//            auto xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-//            next_x_vals.push_back(xy[0]);
-//            next_y_vals.push_back(xy[1]);
-//          }
+          // Translate the points from world coordinates to local coordinates (per ref_x, ref_y, ref_yaw) so we can fit them more easily
+          vector<double> ptsx_l;
+          vector<double> ptsy_l;
+          for (int i = 0; i < ptsx.size(); ++i) {
+            double x_l = (ptsx[i] - ref_x) * cos(ref_yaw) + (ptsy[i] - ref_y) * sin(ref_yaw);
+            double y_l = -(ptsx[i] - ref_x) * sin(ref_yaw) + (ptsy[i] - ref_y) * cos(ref_yaw);
+
+            ptsx_l.push_back(x_l);
+            ptsy_l.push_back(y_l);
+          }
+
+          // Fit with a spline
+          tk::spline s;
+          s.set_points(ptsx_l, ptsy_l);
 
           // Generate output points
           // First, add back remaining points from last planning
@@ -319,32 +338,41 @@ int main() {
             next_x_vals.push_back(previous_path_x[i]);
             next_y_vals.push_back(previous_path_y[i]);
           }
-          // Add new points
+
+          // Then sample some of the points on the fitted spline as new waypoints for the new planning path
+          // We design a way such that, every time we sample a point, it's one step further away from ref_x and ref_y
+          double target_x_l = 30;
+          double target_y_l = s(target_x_l);
+          double target_distance = sqrt(target_x_l * target_x_l + target_y_l * target_y_l);
+
+          double step_duration = 0.02;
+          double step_length = target_speed * 0.447 * step_duration;
+
+          // Assume we are heading straight to the target_x_l and tart_y_l, how much steps we need?
+          // of course this is just an estimate because we probably won't go straight there
+          int step_count = static_cast<int>(target_distance / step_length);
+
+          // Now we know for each sampling, how much incremental local x we want
+          double step_x = target_x_l / step_count;
+
+          // Start the sampling and add sampled points
           const int new_points_count = 50 - previous_path_x.size();
           for (int i = 0; i < new_points_count; ++i) {
-            vector<double> sd = getFrenet(ref_x, ref_y, ref_yaw, map_waypoints_x, map_waypoints_y);
-            vector<double> xy = getXY(sd[0] + (i + 1) * 0.02 * 30 * 0.447, 2, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-            next_x_vals.push_back(xy[0]);
-            next_y_vals.push_back(xy[1]);
+            double sample_x_l = (i + 1) * step_x;
+            double sample_y_l = s(sample_x_l);
+
+            // Translate from local coordinates to world coordinates
+            double x_w = ref_x + cos(ref_yaw) * sample_x_l - sin(ref_yaw) * sample_y_l;
+            double y_w = ref_y + sin(ref_yaw) * sample_x_l + cos(ref_yaw) * sample_y_l;
+
+            next_x_vals.push_back(x_w);
+            next_y_vals.push_back(y_w);
           }
 
-
-
-//          next_x_vals.push_back(ptsx[ptsx.size() - 3]);
-//          next_x_vals.push_back(ptsx[ptsx.size() - 2]);
-//          next_x_vals.push_back(ptsx[ptsx.size() - 1]);
-//
-//          next_y_vals.push_back(ptsy[ptsy.size() - 3]);
-//          next_y_vals.push_back(ptsy[ptsy.size() - 2]);
-//          next_y_vals.push_back(ptsy[ptsy.size() - 1]);
-
-          std::cout << "count " << next_x_vals.size() << " " << next_y_vals.size() << std::endl;
+//          std::cout << "count " << next_x_vals.size() << " " << next_y_vals.size() << std::endl;
 
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
-
-//          msgJson["next_x"] = next_x_vals;
-//          msgJson["next_y"] = next_y_vals;
 
           auto msg = "42[\"control\"," + msgJson.dump() + "]";
 

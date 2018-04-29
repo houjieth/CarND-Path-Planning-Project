@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
@@ -154,6 +155,10 @@ vector<double> getXY(double s,
 
 }
 
+double getLaneFrenetD(int lane_id) {
+  return 2 + 4 * lane_id;
+}
+
 int main() {
   uWS::Hub h;
 
@@ -277,8 +282,66 @@ int main() {
           double ref_y = ptsy[0];
           double ref_yaw = atan2(ptsy[1] - ptsy[0], ptsx[1] - ptsx[0]);
 
-          msgJson["next_x"] = ptsx;
-          msgJson["next_y"] = ptsy;
+          // Set object lane
+          int lane_id = 0;
+
+          // Add more target points into the list for fitting
+          vector<double> next_waypoint_1 =
+              getXY(car_s + 3, getLaneFrenetD(lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          vector<double> next_waypoint_2 =
+              getXY(car_s + 6, getLaneFrenetD(lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          vector<double> next_waypoint_3 =
+              getXY(car_s + 9, getLaneFrenetD(lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+          ptsx.push_back(next_waypoint_1[0]);
+          ptsx.push_back(next_waypoint_2[0]);
+          ptsx.push_back(next_waypoint_3[0]);
+
+          ptsy.push_back(next_waypoint_1[1]);
+          ptsy.push_back(next_waypoint_2[1]);
+          ptsy.push_back(next_waypoint_3[1]);
+
+          std::cout << "prev_count " << previous_path_x.size() << " " << previous_path_y.size() << std::endl;
+
+//          double dist_inc = 0.5;
+//          for(int i = 0; i < 50; i++)
+//          {
+//            double next_s = car_s + (i + 1) * dist_inc;
+//            double next_d = 2;
+//            auto xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+//            next_x_vals.push_back(xy[0]);
+//            next_y_vals.push_back(xy[1]);
+//          }
+
+          // Generate output points
+          // First, add back remaining points from last planning
+          for (int i = 0; i < previous_path_x.size(); ++i) {
+            next_x_vals.push_back(previous_path_x[i]);
+            next_y_vals.push_back(previous_path_y[i]);
+          }
+          // Add new points
+          const int new_points_count = 50 - previous_path_x.size();
+          for (int i = 0; i < new_points_count; ++i) {
+            vector<double> sd = getFrenet(ref_x, ref_y, ref_yaw, map_waypoints_x, map_waypoints_y);
+            vector<double> xy = getXY(sd[0] + (i + 1) * 0.02 * 30 * 0.447, 2, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            next_x_vals.push_back(xy[0]);
+            next_y_vals.push_back(xy[1]);
+          }
+
+
+
+//          next_x_vals.push_back(ptsx[ptsx.size() - 3]);
+//          next_x_vals.push_back(ptsx[ptsx.size() - 2]);
+//          next_x_vals.push_back(ptsx[ptsx.size() - 1]);
+//
+//          next_y_vals.push_back(ptsy[ptsy.size() - 3]);
+//          next_y_vals.push_back(ptsy[ptsy.size() - 2]);
+//          next_y_vals.push_back(ptsy[ptsy.size() - 1]);
+
+          std::cout << "count " << next_x_vals.size() << " " << next_y_vals.size() << std::endl;
+
+          msgJson["next_x"] = next_x_vals;
+          msgJson["next_y"] = next_y_vals;
 
 //          msgJson["next_x"] = next_x_vals;
 //          msgJson["next_y"] = next_y_vals;

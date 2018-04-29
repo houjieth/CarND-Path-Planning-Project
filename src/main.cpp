@@ -235,16 +235,58 @@ int main() {
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
-
           // TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
-          msgJson["next_x"] = next_x_vals;
-          msgJson["next_y"] = next_y_vals;
+
+          // Temporary points to work with for calculating the fitting curve
+          vector<double> ptsx;  // In world coodinates
+          vector<double> ptsy;  // In world coordinates
+
+          // Now we are preparing the points that are the input for the curve fitting
+          // We plan to take the last 2 points from the previous planning points, and then add several target points
+          // to create a list of points to fit
+
+          int prev_path_size = previous_path_x.size();
+          car_yaw = deg2rad(car_yaw);
+
+          if (prev_path_size < 2) {
+            // If the last planning path has less than 2 points, we will just make up the these 2 points now
+            // We make up 2 points: The car's current location, and a imaginary previous location as if the car was
+            // traveling in straight line in the last step
+            double imaginary_last_step_duration = 1.0;
+            double current_car_x_w = car_x;
+            double current_car_y_w = car_y;
+            double last_car_x_w = car_x - cos(car_yaw) * imaginary_last_step_duration;
+            double last_car_y_w = car_y - sin(car_yaw) * imaginary_last_step_duration;
+            ptsx.push_back(last_car_x_w);
+            ptsx.push_back(current_car_x_w);
+            ptsy.push_back(last_car_y_w);
+            ptsy.push_back(current_car_y_w);
+          } else {
+            // Otherwise, we will just pick up the last two points from previous path planning. We do this because we
+            // want to ensure the new planned path can smoothly connect with the previous planned path
+            ptsx.push_back(previous_path_x[prev_path_size - 2]);
+            ptsx.push_back(previous_path_x[prev_path_size - 1]);
+            ptsy.push_back(previous_path_y[prev_path_size - 2]);
+            ptsy.push_back(previous_path_y[prev_path_size - 1]);
+          }
+
+          // Also, the first 2 points of the created list is going to be used to determine the car coordination system.
+          // The yaw of the vector (ref_yaw) created by the first 2 points decide the rotation from world coordinates,
+          // and the location of the first point (ref_x and ref_y) decides the translation from world coordinates
+          double ref_x = ptsx[0];
+          double ref_y = ptsy[0];
+          double ref_yaw = atan2(ptsy[1] - ptsy[0], ptsx[1] - ptsx[0]);
+
+          msgJson["next_x"] = ptsx;
+          msgJson["next_y"] = ptsy;
+
+//          msgJson["next_x"] = next_x_vals;
+//          msgJson["next_y"] = next_y_vals;
 
           auto msg = "42[\"control\"," + msgJson.dump() + "]";
 
           //this_thread::sleep_for(chrono::milliseconds(1000));
           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-
         }
       } else {
         // Manual driving

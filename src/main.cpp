@@ -241,11 +241,17 @@ int main() {
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
+          const double speed_limit = 49;
+
+          // Do decision planning first, then do path generation
+          double eventual_target_speed;
+
+          // Use perception result to do decision planning
+
           // Set object lane
           int target_lane_id = 1;
 
           // Set target speed
-          double eventual_target_speed = 49;
           double target_speed;
           double speed_step = 2;
           if (car_speed + speed_step < eventual_target_speed) {

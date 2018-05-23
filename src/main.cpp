@@ -38,6 +38,7 @@ string hasData(string s) {
 double distance(double x1, double y1, double x2, double y2) {
   return sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
 }
+
 int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y) {
 
   double closestLen = 100000; //large number
@@ -159,6 +160,58 @@ double getLaneFrenetD(int lane_id) {
   return 2 + 4 * lane_id;
 }
 
+int getLaneIdFromFrenetD(double d) {
+  return static_cast<int>(d / 4);
+}
+
+double laneFrontCarDistance(int target_lane_id, double car_s, json::const_reference sensor_fusion) {
+  // Closest front car and back car
+  double front_car_s_min_distance = numeric_limits<double>::max();
+  double back_car_s_min_distance = numeric_limits<double>::max();
+  for (const auto& other_car : sensor_fusion) {
+    double other_car_s = other_car[5];
+    double other_car_d = other_car[6];
+    // Check if other car is in the same lane as ours
+    int other_car_lane_id = getLaneIdFromFrenetD(other_car_d);
+    if (other_car_lane_id == target_lane_id) {
+      if (other_car_s > car_s) {
+        front_car_s_min_distance = min(front_car_s_min_distance, other_car_s - car_s);
+      } else {
+        back_car_s_min_distance = min(back_car_s_min_distance, car_s - other_car_s);
+      }
+    }
+  }
+  cout << "...For target lane " << target_lane_id
+       << ", front car distance " << front_car_s_min_distance
+       << ", back car distance " << back_car_s_min_distance;
+
+  if (front_car_s_min_distance > 30 && back_car_s_min_distance > 20) {
+    return front_car_s_min_distance;
+  } else {
+    return -1;
+  }
+}
+
+int laneSwitchTest(double car_s, int car_lane_id, json::const_reference sensor_fusion) {
+  double left_lane_front_car_distance = car_lane_id == 0 ? -1 : laneFrontCarDistance(car_lane_id - 1, car_s, sensor_fusion);
+  double right_lane_front_car_distance = car_lane_id == 2 ? -1 : laneFrontCarDistance(car_lane_id + 1, car_s, sensor_fusion);
+
+  if (left_lane_front_car_distance == -1 && right_lane_front_car_distance == -1) {
+    return car_lane_id;
+  }
+  if (left_lane_front_car_distance == -1) {
+    return car_lane_id + 1;
+  }
+  if (right_lane_front_car_distance == -1) {
+    return car_lane_id - 1;
+  }
+  if (left_lane_front_car_distance < right_lane_front_car_distance) {
+    return car_lane_id + 1;
+  } else {
+    return car_lane_id - 1;
+  }
+}
+
 int main() {
   uWS::Hub h;
 
@@ -175,6 +228,8 @@ int main() {
   double max_s = 6945.554;
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
+
+  double last_target_speed = -1;
 
   string line;
   while (getline(in_map_, line)) {
@@ -196,11 +251,12 @@ int main() {
     map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<
-      uWS::SERVER> ws,
-                                                                                                           char *data,
-                                                                                                           size_t length,
-                                                                                                           uWS::OpCode opCode) {
+  h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx,
+                  &map_waypoints_dy, &last_target_speed]
+                  (uWS::WebSocket<uWS::SERVER> ws,
+                   char *data,
+                   size_t length,
+                   uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -226,6 +282,8 @@ int main() {
           double car_yaw = j[1]["yaw"];
           double car_speed = j[1]["speed"];
 
+          int car_lane_id = getLaneIdFromFrenetD(car_d);
+
           // Previous path data given to the Planner
           auto previous_path_x = j[1]["previous_path_x"];
           auto previous_path_y = j[1]["previous_path_y"];
@@ -241,24 +299,84 @@ int main() {
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
-          const double speed_limit = 49;
-
           // Do decision planning first, then do path generation
-          double eventual_target_speed;
+          double eventual_target_speed = 49;
 
-          // Use perception result to do decision planning
+          int target_lane_id = car_lane_id;
 
-          // Set object lane
-          int target_lane_id = 1;
+          bool is_too_close = false;
 
-          // Set target speed
-          double target_speed;
-          double speed_step = 2;
-          if (car_speed + speed_step < eventual_target_speed) {
-            target_speed = car_speed + speed_step;
-          } else {
-            target_speed = car_speed - speed_step;
+          // Look around at other cars. Use perception result to do decision planning
+          double front_car_min_distance = numeric_limits<double>::max();
+          int front_car_idx = -1;
+          for (int i = 0; i < sensor_fusion.size(); ++i) {
+            const auto& other_car = sensor_fusion[i];
+            double other_car_s = other_car[5];
+            double other_car_d = other_car[6];
+            // Check if other car is in the same lane as ours
+            int other_car_lane_id = getLaneIdFromFrenetD(other_car_d);
+            if (other_car_lane_id == car_lane_id && other_car_s > car_s) {
+              if (other_car_s - car_s < front_car_min_distance) {
+                front_car_min_distance = other_car_s - car_s;
+                front_car_idx = i;
+              }
+            }
           }
+
+          // Check if other car is too close to us in s coordinate
+          if (front_car_min_distance < 50) {
+            cout << "...Front car distance low (" << front_car_min_distance << ")" << endl;
+            cout << "...Front car id (" << front_car_idx << ")" << endl;
+            is_too_close = true;
+            // See if we can switch lane
+            target_lane_id = laneSwitchTest(car_s, car_lane_id, sensor_fusion);
+            cout << "...Lane switch test: Can to switch to lane " << target_lane_id << endl;
+            if (target_lane_id == car_lane_id) {
+              // Decide to follow front car
+              auto front_car = sensor_fusion[front_car_idx];
+              double front_car_vx = front_car[3];
+              double front_car_vy = front_car[4];
+              double front_car_v = sqrt(front_car_vx * front_car_vx + front_car_vy * front_car_vy);
+              eventual_target_speed = front_car_v;
+              cout << "Inside \"too close\" area. Decision: follow at speed " << eventual_target_speed << endl;
+            } else {
+              cout << "Inside \"too close\" area. Decision: switch to lane " << target_lane_id << endl;
+            }
+          }
+
+          // Set target speed based on current car speed and situation
+          double target_speed;
+          if (car_speed < eventual_target_speed) {
+            target_speed = car_speed + min(2.0, eventual_target_speed - car_speed);
+          } else {
+            if (is_too_close) {
+              target_speed = car_speed - 3.0;
+            } else {
+              target_speed = car_speed - min(car_speed - eventual_target_speed, 2.0);
+            }
+          }
+
+          // We cannot change target speed to rapidly
+          if (last_target_speed != -1 && target_speed - last_target_speed > 2.0) {
+            target_speed = last_target_speed + 2.0;
+          } else if (last_target_speed != -1 && target_speed - last_target_speed < -2.0) {
+            target_speed = last_target_speed - 2.0;
+          }
+
+          // Target speed cannot be less than zero
+          if (target_speed < 0) {
+            target_speed = 0;
+          }
+
+          // Update last target speed
+          last_target_speed = target_speed;
+
+          cout << "car speed " << car_speed << ", target speed " << target_speed
+               << ", eventual target speed " << eventual_target_speed
+               << ", last target speed " << last_target_speed
+               << ", lane id " << car_lane_id
+               << ", target lane id " << target_lane_id
+               << endl;
 
           // TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
 
@@ -307,11 +425,11 @@ int main() {
 
           // Add more target points into the list for fitting
           vector<double> next_waypoint_1 =
-              getXY(car_s + 30, getLaneFrenetD(target_lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
-          vector<double> next_waypoint_2 =
               getXY(car_s + 60, getLaneFrenetD(target_lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
-          vector<double> next_waypoint_3 =
+          vector<double> next_waypoint_2 =
               getXY(car_s + 90, getLaneFrenetD(target_lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          vector<double> next_waypoint_3 =
+              getXY(car_s + 120, getLaneFrenetD(target_lane_id), map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
           ptsx.push_back(next_waypoint_1[0]);
           ptsx.push_back(next_waypoint_2[0]);
